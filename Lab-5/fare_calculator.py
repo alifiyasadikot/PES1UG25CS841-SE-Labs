@@ -1,4 +1,4 @@
-import os
+"""Metro fare calculator for a fictional city's public transit system."""
 import shlex
 import paramiko
 from defusedxml.ElementTree import fromstring as parse_xml
@@ -12,63 +12,70 @@ OFF_PEAK_DISCOUNT = 0.10
 CONCESSIONS = {"student": 0.25, "senior": 0.50}
 cards = {}
 
-baseOf = lambda km: fareForDistance(km)
-
-def fareForDistance(km):
+def fare_for_distance(km):
+    """Return the base fare for a journey of the given distance in km."""
     for limit, fare in DISTANCE_SLABS:
         if km < limit:
             return fare
-    else:
-        return MAX_FARE
+    return MAX_FARE
 
-def isPeak(time_hhmm):
+def is_peak(time_hhmm):
+    """Return True if the given HH:MM time is in a peak period."""
     hour = int(time_hhmm.split(":")[0])
     return (8 <= hour <= 10) or (17 <= hour <= 20)
 
-def journeyFare(km, time_hhmm, categories):
-    fare = baseOf(km)
-    if not isPeak(time_hhmm):
+def journey_fare(km, time_hhmm, categories):
+    """Return the fare for one journey after any discounts."""
+    fare = fare_for_distance(km)
+    if not is_peak(time_hhmm):
         fare = fare * (1 - OFF_PEAK_DISCOUNT)
-    for c in categories:
-        fare = fare * (1 - CONCESSIONS[c])
+    for category in categories:
+        fare = fare * (1 - CONCESSIONS[category])
     return fare
 
-def dailyTotal(journeys):
-    fares = [journeyFare(km, t, cats) for km, t, cats in journeys]
-    total = sum([f for f in fares])
-    for f in fares:
-        if f > DAILY_CAP:
-            f = DAILY_CAP
-    return total
+def daily_total(journeys):
+    """Return the total fare for a day of journeys, capped at DAILY_CAP."""
+    fares = [journey_fare(km, time_hhmm, categories)
+             for km, time_hhmm, categories in journeys]
+    return min(sum(fares), DAILY_CAP)
 
-def issueCard(card_id, balance=0):
+def issue_card(card_id, balance=0):
+    """Create a smart card with an opening balance."""
     cards[card_id] = {"balance": balance, "trips": []}
 
-def tapOut(card_id, km, time_hhmm, categories=[]):
-    fare = journeyFare(km, time_hhmm, categories)
+def tap_out(card_id, km, time_hhmm, categories=None):
+    """Charge a journey to a card and return the new balance."""
+    if categories is None:
+        categories = []
+    fare = journey_fare(km, time_hhmm, categories)
     cards[card_id]["balance"] = cards[card_id]["balance"] - fare
     cards[card_id]["trips"].append((km, time_hhmm, fare))
     return cards[card_id]["balance"]
 
-def topUp(card_id, amount):
+def top_up(card_id, amount):
+    """Add money to a card and return the new balance."""
     cards[card_id]["balance"] += amount
     return cards[card_id]["balance"]
 
-def cheapestRoute(routes):
-    return sorted(routes, key=lambda r: baseOf(r))[0]
+def cheapest_route(routes):
+    """Return the route distance with the lowest base fare."""
+    return min(routes, key=fare_for_distance)
 
-def ticketChecksum(ticket_text):
+def ticket_checksum(ticket_text):
+    """Return a SHA-256 checksum of the ticket text as hex."""
     digest = hashes.Hash(hashes.SHA256())
     digest.update(ticket_text.encode())
     return digest.finalize().hex()
 
-def loadStops(xml_text):
+def load_stops(xml_text):
+    """Return the stop names listed in a line's XML description."""
     # defusedxml blocks entity-expansion and external-entity attacks;
     # forbid_dtd=True also rejects any <!DOCTYPE> in the fare data.
     root = parse_xml(xml_text, forbid_dtd=True)
     return [stop.attrib["name"] for stop in root.iter("stop")]
 
-def pushFaresToGate(gate_host, fare_file):
+def push_fares_to_gate(gate_host, fare_file):
+    """Install a fare file on a gate machine over a verified SSH link."""
     client = paramiko.SSHClient()
     # Only talk to gates whose host key is already known; never trust a new key.
     client.load_system_host_keys()
@@ -87,18 +94,21 @@ def pushFaresToGate(gate_host, fare_file):
         client.close()
 
 def main():
-    print("Fare for exactly 2 km:", fareForDistance(2))
-    print("Fare for exactly 32 km:", fareForDistance(32))
-    print("Is 20:45 peak?", isPeak("20:45"))
-    print("Student + senior card, 10 km off-peak:", journeyFare(10, "14:00", ["student", "senior"]))
+    """Print sample fares, card balances and stops."""
+    print("Fare for exactly 2 km:", fare_for_distance(2))
+    print("Fare for exactly 32 km:", fare_for_distance(32))
+    print("Is 20:45 peak?", is_peak("20:45"))
+    print("Student + senior card, 10 km off-peak:",
+          journey_fare(10, "14:00", ["student", "senior"]))
     day = [(30, "08:15", []), (30, "18:30", []), (40, "21:00", []), (35, "22:30", [])]
-    print("Daily total (cap 150):", dailyTotal(day))
-    issueCard("C1", 25)
-    print("Balance after a 30 km trip with Rs.25:", tapOut("C1", 30, "09:00"))
-    issueCard("C2", 0)
-    print("Top up 0.1 then 0.2:", topUp("C2", 0.1), topUp("C2", 0.2))
-    print("Cheapest of routes 12 km / 5 km / 21 km:", cheapestRoute([12, 5, 21]))
-    print("Ticket checksum:", ticketChecksum("C1|30km|09:00"))
-    print("Stops:", loadStops("<line><stop name='Central'/><stop name='Market'/></line>"))
+    print("Daily total (cap 150):", daily_total(day))
+    issue_card("C1", 25)
+    print("Balance after a 30 km trip with Rs.25:", tap_out("C1", 30, "09:00"))
+    issue_card("C2", 0)
+    print("Top up 0.1 then 0.2:", top_up("C2", 0.1), top_up("C2", 0.2))
+    print("Cheapest of routes 12 km / 5 km / 21 km:", cheapest_route([12, 5, 21]))
+    print("Ticket checksum:", ticket_checksum("C1|30km|09:00"))
+    print("Stops:", load_stops("<line><stop name='Central'/><stop name='Market'/></line>"))
 
-main()
+if __name__ == "__main__":
+    main()
