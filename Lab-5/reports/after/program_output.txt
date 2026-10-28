@@ -1,0 +1,11 @@
+Fare for exactly 2 km: 10
+Fare for exactly 32 km: 50
+Is 20:45 peak? False
+Student + senior card, 10 km off-peak: 13.50
+Daily total (cap 150): 150.00
+30 km trip with Rs.25 refused: insufficient balance (fare Rs.50.00, balance Rs.25.00)
+Balance after topping up Rs.50 and retrying: 25.00
+Top up 0.1 then 0.2: 0.10 0.30
+Cheapest of routes 12 km / 5 km / 21 km: 5
+Ticket checksum: 45f7d38543ca2889b7494ca8c81dd39c61fafd95f20c5b3de1c2862fc9b66610
+Stops: ['Central', 'Market']
