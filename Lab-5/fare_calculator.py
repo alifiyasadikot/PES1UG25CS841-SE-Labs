@@ -1,6 +1,7 @@
 import os
-import xml.sax
+import shlex
 import paramiko
+from defusedxml.ElementTree import fromstring as parse_xml
 from cryptography.hazmat.primitives import hashes
 
 # Metro fare rules (fictional city)
@@ -57,30 +58,33 @@ def cheapestRoute(routes):
     return sorted(routes, key=lambda r: baseOf(r))[0]
 
 def ticketChecksum(ticket_text):
-    digest = hashes.Hash(hashes.MD5())
+    digest = hashes.Hash(hashes.SHA256())
     digest.update(ticket_text.encode())
     return digest.finalize().hex()
 
-class StopHandler(xml.sax.ContentHandler):
-    def __init__(self):
-        super().__init__()
-        self.stops = []
-
-    def startElement(self, name, attrs):
-        if name == "stop":
-            self.stops.append(attrs["name"])
-
 def loadStops(xml_text):
-    handler = StopHandler()
-    xml.sax.parseString(xml_text.encode(), handler)
-    return handler.stops
+    # defusedxml blocks entity-expansion and external-entity attacks;
+    # forbid_dtd=True also rejects any <!DOCTYPE> in the fare data.
+    root = parse_xml(xml_text, forbid_dtd=True)
+    return [stop.attrib["name"] for stop in root.iter("stop")]
 
 def pushFaresToGate(gate_host, fare_file):
     client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    client.connect(gate_host, username="depot")
-    client.exec_command("install_fares " + fare_file)
-    client.close()
+    # Only talk to gates whose host key is already known; never trust a new key.
+    client.load_system_host_keys()
+    client.set_missing_host_key_policy(paramiko.RejectPolicy())
+    try:
+        client.connect(gate_host, username="depot", timeout=10)
+        # fare_file is shell-quoted, so it is passed as one plain argument
+        # and cannot add extra shell commands (reviewed Bandit B601).
+        command = "install_fares " + shlex.quote(fare_file)
+        _, stdout, stderr = client.exec_command(command, timeout=30)  # nosec B601
+        exit_status = stdout.channel.recv_exit_status()
+        if exit_status != 0:
+            error = stderr.read().decode("utf-8", errors="replace").strip()
+            raise RuntimeError(f"install_fares failed ({exit_status}): {error}")
+    finally:
+        client.close()
 
 def main():
     print("Fare for exactly 2 km:", fareForDistance(2))
