@@ -1,66 +1,104 @@
 """Metro fare calculator for a fictional city's public transit system."""
 import shlex
+from decimal import ROUND_HALF_UP, Decimal
+
 import paramiko
 from defusedxml.ElementTree import fromstring as parse_xml
 from cryptography.hazmat.primitives import hashes
 
 # Metro fare rules (fictional city)
+# Each slab is (upper distance limit in km, fare); the limit is inclusive.
 DISTANCE_SLABS = [(2, 10), (5, 20), (12, 30), (21, 40), (32, 50)]
 MAX_FARE = 60
 DAILY_CAP = 150
-OFF_PEAK_DISCOUNT = 0.10
-CONCESSIONS = {"student": 0.25, "senior": 0.50}
+# Peak periods as (start, end) HH:MM times; both ends are inclusive.
+PEAK_PERIODS = (("08:00", "10:00"), ("17:00", "20:00"))
+# Money uses Decimal so that rupee amounts add up exactly.
+OFF_PEAK_DISCOUNT = Decimal("0.10")
+CONCESSIONS = {"student": Decimal("0.25"), "senior": Decimal("0.50")}
+PAISA = Decimal("0.01")
 cards = {}
+
+
+def to_rupees(amount):
+    """Return the amount as a Decimal rounded to the nearest paisa."""
+    return Decimal(str(amount)).quantize(PAISA, rounding=ROUND_HALF_UP)
 
 
 def fare_for_distance(km):
     """Return the base fare for a journey of the given distance in km."""
     for limit, fare in DISTANCE_SLABS:
-        if km < limit:
+        if km <= limit:
             return fare
     return MAX_FARE
 
 
+def to_minutes(time_hhmm):
+    """Convert an HH:MM time to minutes after midnight."""
+    hours, minutes = (int(part) for part in time_hhmm.split(":"))
+    if not 0 <= hours <= 23 or not 0 <= minutes <= 59:
+        raise ValueError(f"Invalid time: {time_hhmm}")
+    return hours * 60 + minutes
+
+
 def is_peak(time_hhmm):
     """Return True if the given HH:MM time is in a peak period."""
-    hour = int(time_hhmm.split(":")[0])
-    return (8 <= hour <= 10) or (17 <= hour <= 20)
+    now = to_minutes(time_hhmm)
+    return any(to_minutes(start) <= now <= to_minutes(end)
+               for start, end in PEAK_PERIODS)
 
 
 def journey_fare(km, time_hhmm, categories):
-    """Return the fare for one journey after any discounts."""
-    fare = fare_for_distance(km)
+    """Return the fare for one journey after any discounts.
+
+    A rider gets only the largest concession they qualify for;
+    concessions are not stacked on top of each other.
+    """
+    fare = Decimal(fare_for_distance(km))
     if not is_peak(time_hhmm):
-        fare = fare * (1 - OFF_PEAK_DISCOUNT)
-    for category in categories:
-        fare = fare * (1 - CONCESSIONS[category])
-    return fare
+        fare *= 1 - OFF_PEAK_DISCOUNT
+    best_concession = max(
+        (CONCESSIONS[category] for category in categories), default=0)
+    fare *= 1 - best_concession
+    return to_rupees(fare)
 
 
 def daily_total(journeys):
     """Return the total fare for a day of journeys, capped at DAILY_CAP."""
     fares = [journey_fare(km, time_hhmm, categories)
              for km, time_hhmm, categories in journeys]
-    return min(sum(fares), DAILY_CAP)
+    return to_rupees(min(sum(fares), DAILY_CAP))
 
 
 def issue_card(card_id, balance=0):
     """Create a smart card with an opening balance."""
-    cards[card_id] = {"balance": balance, "trips": []}
+    cards[card_id] = {"balance": to_rupees(balance), "trips": []}
 
 
 def tap_out(card_id, km, time_hhmm, categories=None):
-    """Charge a journey to a card and return the new balance."""
+    """Charge a journey to a card and return the new balance.
+
+    Raises ValueError if the card cannot cover the fare, so the
+    balance never goes negative.
+    """
     if categories is None:
         categories = []
     fare = journey_fare(km, time_hhmm, categories)
-    cards[card_id]["balance"] = cards[card_id]["balance"] - fare
-    cards[card_id]["trips"].append((km, time_hhmm, fare))
-    return cards[card_id]["balance"]
+    card = cards[card_id]
+    if fare > card["balance"]:
+        raise ValueError(
+            f"insufficient balance (fare Rs.{fare}, "
+            f"balance Rs.{card['balance']})")
+    card["balance"] -= fare
+    card["trips"].append((km, time_hhmm, fare))
+    return card["balance"]
 
 
 def top_up(card_id, amount):
     """Add money to a card and return the new balance."""
+    amount = to_rupees(amount)
+    if amount <= 0:
+        raise ValueError("Top-up amount must be positive")
     cards[card_id]["balance"] += amount
     return cards[card_id]["balance"]
 
@@ -121,7 +159,13 @@ def main():
     ]
     print("Daily total (cap 150):", daily_total(day))
     issue_card("C1", 25)
-    print("Balance after a 30 km trip with Rs.25:",
+    try:
+        print("Balance after a 30 km trip with Rs.25:",
+              tap_out("C1", 30, "09:00"))
+    except ValueError as error:
+        print("30 km trip with Rs.25 refused:", error)
+    top_up("C1", 50)
+    print("Balance after topping up Rs.50 and retrying:",
           tap_out("C1", 30, "09:00"))
     issue_card("C2", 0)
     print("Top up 0.1 then 0.2:", top_up("C2", 0.1), top_up("C2", 0.2))
